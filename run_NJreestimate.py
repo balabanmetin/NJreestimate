@@ -21,6 +21,10 @@ def nodecopy(node):
     return res
 
 
+def get_labels(node):
+    return [i.label for i in node.traverse_postorder(internal=False)]
+
+
 if __name__ == '__main__':
     parser = OptionParser()
     parser.add_option("-t", "--tree", dest="tree_fp",
@@ -45,25 +49,70 @@ if __name__ == '__main__':
                 seqdict[seq] = [name]
     assert len(seqdict) > 3
 
-    uniq_ref = tempfile.NamedTemporaryFile(delete=True, mode='w+t').name
-    with open(uniq_ref, "w") as f:
-        uniqtags = []
-        alltags = []
-        for k, v in seqdict.items():
-            uniqtags.append(v[0])
-            alltags += v
-            f.write(">" + v[0] + "\n" + k + "\n")
+    alltags = []
+    for k, v in seqdict.items():
+        alltags += v
+
 
     orig_branch_tree_full = ts.read_tree_newick(options.tree_fp)
+
+    orig_branch_tree_with_dups = orig_branch_tree_full.extract_tree(alltags, without=False, suppress_unifurcations=True)
+    orig_branch_tree_with_dups.resolve_polytomies()
+    orig_branch_tree_with_dups.is_rooted = False
+
+    leafs_with_dups_map = dict()
+    for n in orig_branch_tree_with_dups.traverse_postorder(internal=False):
+        leafs_with_dups_map[n.label] = n
+
+    uniqtags = {}
+    for k, v in seqdict.items():
+        if len(v) == 1:
+            uniqtags[v[0]] = (k, None)
+            continue
+        visited = {i: False for i in v}
+        all_choices = {}
+        for i in v:
+            if visited[i]:
+                continue
+            else:
+                visited[i] = True
+
+            # starting from i, traverse upwards in the tree.
+            # for each node tested, check if all labels under it
+            # are in the group v.
+            # if yes, update the mrca as the current node
+            #
+            mrca = leafs_with_dups_map[i]
+            seed = mrca
+            mrca_count = 1
+
+            for a in seed.traverse_ancestors(include_self=False):
+                sibling_labels = get_labels(a)
+                if all([i in visited for i in sibling_labels]):
+                    mrca = a
+                    mrca_count = len(sibling_labels)
+                    for i in sibling_labels:
+                        visited[i] = True
+                else:
+                    break
+            all_choices[i] = (mrca_count, mrca)
+        max_key = max(all_choices, key=lambda x: (all_choices[x][0], x))
+        uniqtags[max_key] = (k, all_choices[max_key][1])
+
+    uniq_ref = tempfile.NamedTemporaryFile(delete=True, mode='w+t').name
+    with open(uniq_ref, "w") as f:
+        for k, v in uniqtags.items():
+            f.write(">" + k + "\n" + v[0] + "\n")
+
+
+
     orig_branch_tree = orig_branch_tree_full.extract_tree(uniqtags, without=False, suppress_unifurcations=True)
     orig_branch_tree.resolve_polytomies()
     orig_branch_tree.is_rooted = False
     orig_branch_resolved_fp = tempfile.NamedTemporaryFile(delete=True, mode='w+t').name
     orig_branch_tree.write_tree_newick(orig_branch_resolved_fp)
 
-    orig_branch_tree_with_dups = orig_branch_tree_full.extract_tree(alltags, without=False, suppress_unifurcations=True)
-    orig_branch_tree_with_dups.resolve_polytomies()
-    orig_branch_tree_with_dups.is_rooted = False
+
 
     if _platform == "darwin":
         fasttree_exec = pkg_resources.resource_filename('NJreestimate', "tools/FastTree-darwin")
@@ -91,24 +140,19 @@ if __name__ == '__main__':
     leaf_map = dict()
     for n in uniqs_tree_nj.traverse_postorder(internal=False):
         leaf_map[n.label] = n
-    for k, v in seqdict.items():
-        if len(v) == 1:
+
+    for k, v in uniqtags.items():
+        seq, mrca = v
+        if len(seqdict[seq]) == 1:
             continue
-        mrca = orig_branch_tree_with_dups.mrca(v)
-        mrca_labels = [m.label for m in mrca.traverse_postorder(internal=False)]
-        if len(mrca_labels) == len(v):
-            existing = leaf_map[v[0]]
-            o_node_parent = existing.parent
-            o_node_parent.remove_child(existing)
-            mrca_copy = nodecopy(mrca)
-            mrca_copy.edge_length = existing.edge_length
-            o_node_parent.add_child(mrca_copy)
-            #
-            # for e in mrca_copy.traverse_postorder():
-            #     e.edge_length = 0
-            # leaf_map[v[0]].label = None
-            # for c in mrca_copy.children:
-            #     leaf_map[v[0]].add_child(c)
+
+        existing = leaf_map[k]
+        o_node_parent = existing.parent
+        o_node_parent.remove_child(existing)
+        mrca_copy = nodecopy(mrca)
+        mrca_copy.edge_length = existing.edge_length
+        o_node_parent.add_child(mrca_copy)
+
 
     uniqs_tree_nj.write_tree_newick(options.output_fp, hide_rooted_prefix=True)
 
